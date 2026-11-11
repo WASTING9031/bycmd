@@ -1,0 +1,90 @@
+name: Build arm64
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Android NDK r26d (pinned, deterministic) ────────────────────
+      - name: Set up NDK
+        id: ndk
+        run: |
+          NDK_VERSION=r26d
+          NDK_ZIP=android-ndk-${NDK_VERSION}-linux.zip
+          curl -fsSL "https://dl.google.com/android/repository/${NDK_ZIP}" -o /tmp/ndk.zip
+          unzip -q /tmp/ndk.zip -d /opt
+          echo "NDK_HOME=/opt/android-ndk-${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      # ── 3. Build with ndk-build ────────────────────────────────────────
+      - name: ndk-build
+        working-directory: bycmd
+        run: |
+          $NDK_HOME/ndk-build \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=jni/Android.mk \
+            NDK_APPLICATION_MK=jni/Application.mk \
+            NDK_LIBS_OUT=build/libs \
+            NDK_OUT=build/obj \
+            -j$(nproc)
+
+      # ── 4. Rename output to versioned binary ───────────────────────────
+      - name: Rename artifact
+        run: |
+          mkdir -p dist
+          BINARY=bycmd/build/libs/arm64-v8a/eeeww
+          cp "$BINARY" dist/standoff-esp-arm64
+
+      # ── 5. Upload artifact ─────────────────────────────────────────────
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: standoff-esp-arm64
+          path: dist/standoff-esp-arm64
+          retention-days: 7
+
+      # ── 6. Package as .sh installer (for MT Manager / /data/local/tmp) ─
+      - name: Create .sh installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          BINARY=dist/standoff-esp-arm64
+          test -f "$BINARY"
+
+          {
+            cat <<'HEADER'
+          #!/system/bin/sh
+          set -e
+          DEST=/data/local/tmp/rail-esp
+          echo "[*] Writing binary..."
+          base64 -d > "$DEST" <<'B64DATA'
+          HEADER
+            base64 "$BINARY"
+            cat <<'FOOTER'
+          B64DATA
+          chmod 755 "$DEST"
+          echo "[*] Launching..."
+          "$DEST" &
+          echo "[+] Done. PID=$!"
+          FOOTER
+          } > dist/install.sh
+
+          chmod +x dist/install.sh
+          echo "[CI] installer size: $(wc -c < dist/install.sh) bytes"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: standoff-esp-install-sh
+          path: dist/install.sh
+          retention-days: 7
